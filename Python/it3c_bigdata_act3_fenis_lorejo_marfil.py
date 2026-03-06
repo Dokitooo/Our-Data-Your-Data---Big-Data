@@ -1,66 +1,75 @@
 """
 YOUR DATA? OUR DATA!
 BUCS IT3C - Big Data Analysis
-Laboratory Activity 3 - Refactored for DataFrame API
+Laboratory Activity 3
 
 FENIS, Austin B.
 LOREJO, Jerome M.
 MARFIL, John Marvin G.
 """
 
+import csv
+from io import StringIO
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, year, count, desc, to_date
 
-# 1. Initialize Spark Session
-spark = SparkSession.builder \
-    .appName("Our_Data_Refactored") \
-    .getOrCreate()
+spark = SparkSession.builder.appName("Our_Data").getOrCreate()
+sc = spark.sparkContext
 
-# 2. Load Dataset
-df = spark.read.csv("customers-1000.csv", header=True, inferSchema=True)
+yourData = sc.textFile("customers-1000.csv")
+header = yourData.first()
+ourData = yourData.filter(lambda x: x != header)
 
-# ---------------------------------------------------------
-# STRATEGY 1: Repartitioning & Active Subscriber Filtering
-# Logic: Subscriptions are active if Date >= 2021-03-06 (5 years before today).
-# ---------------------------------------------------------
-# We cast to date type first to ensure accurate comparison
-df_active = df.withColumn("Subscription Date", to_date(col("Subscription Date"))) \
-    .repartition(10) \
-    .filter(col("Subscription Date") >= "2021-03-06")
+"""
+[1ST PARTITIONING STRATEGY]
+::  'Repartitioning"
+::  Since this 1000-row dataset involves customer subscription
+and assuming that subscriptions expire after 5 years, we filtered
+the dataset to remove customers whose subscription dates were older
+than March 6, 2021, five years before March 6, 2026.
+"""
 
-print(f"Total Active Subscribers: {df_active.count()}")
-print(f"Number of partitions (Strategy 1): {df_active.rdd.getNumPartitions()}")
+# Partitioning the dataset into 10 then directly filtering active subscribers
+ourData = ourData\
+  .repartition(10)\
+  .map(lambda x: list(csv.reader(StringIO(x), skipinitialspace=True))[0])\
+  .filter(lambda x: len(x) > 10 and x[10].strip() >= "2021-03-06")
 
-# ---------------------------------------------------------
-# STRATEGY 2: Hash Partitioning (by Country)
-# Logic: Partitioning by Country to optimize searches for specific regions.
-# ---------------------------------------------------------
-num_countries = df_active.select("Country").distinct().count()
-df_partitioned_country = df_active.repartition(num_countries, "Country")
+for row in ourData.collect():
+    print(row)
 
-print(f"Number of partitions by Country: {df_partitioned_country.rdd.getNumPartitions()}")
+print("\n\nNo. of partitions:", ourData.getNumPartitions())
+print("Active subscribers: " + str(ourData.count()), "\n----------\n\n\n\n")
 
-# ---------------------------------------------------------
-# TRANSFORMATION PIPELINE: Philippines Focus
-# ---------------------------------------------------------
-# Step 1: Filter specifically for Philippines
-# Step 2: Extract Year from Subscription Date
-# Step 3: Group by Year to see subscription trends in the PH
-# Step 4: Sort by Year descending
-ph_summary = df_partitioned_country \
-    .filter(col("Country") == "Philippines") \
-    .withColumn("Sub_Year", year(col("Subscription Date"))) \
-    .groupBy("Country", "Sub_Year") \
-    .agg(count("Customer Id").alias("Total_PH_Subscribers")) \
-    .orderBy(desc("Sub_Year"))
 
-# Show the results for the Philippines
-ph_summary.show()
+"""
+[2ND PARTITIONING STRATEGY]
+::  'Hash Partitioning"
+::  The already partitioned dataset is once again partitioned
+according to the countries of each customer, with the number of
+countries as the number of partitioning (not counting their duplicates).
+Upon repartitioning, all customers based in the Philippines are then
+located and counted, thus finding the number of active subscribers
+from the Philippines.
+"""
 
-# Save the partitioned data to disk
-# This organizes the files by Country for faster querying later
-ph_summary.write.partitionBy("Country").mode("overwrite").parquet("active_subs_ph_summary")
+# Counting the number of countries.
+num_countries = ourData\
+  .map(lambda x: x[6])\
+  .distinct()\
+  .count()
 
-print("Processing Complete. Data saved to parquet.")
+# Repartitioning the dataset by country.
+ourData = ourData\
+  .map(lambda x: (x[6], x))\
+  .sortByKey(numPartitions = num_countries)
+
+# Counting the active subscribers from the Philippines
+subs_phil = ourData.filter(lambda x: x[0] == "Philippines").collect()
+
+for country, row in subs_phil:
+    print(row)
+
+print("\n\nNo. of partitions:", ourData.getNumPartitions())
+print("Active subscribers from the Philippines: ", len(subs_phil), "\n----------\n")
 
 spark.stop()
